@@ -22,6 +22,10 @@ data class ItemEmRevisao(
 )
 
 class NotaRepository(private val db: AppDatabase, private val categorizador: Categorizador) {
+    suspend fun excluirNota(notaId: Long): Boolean = db.withTransaction {
+        db.notaDao().excluirNota(notaId) > 0
+    }
+
     suspend fun categorizar(nota: NotaFiscal): List<ItemEmRevisao> = nota.itens.map { item ->
         ItemEmRevisao(item.descricao, item.codigo, item.quantidade, item.unidade, item.valorUnitario, item.valorTotal, categorizador.categorizar(item.descricao))
     }

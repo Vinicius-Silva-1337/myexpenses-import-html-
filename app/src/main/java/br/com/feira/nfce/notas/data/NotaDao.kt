@@ -19,6 +19,7 @@ interface NotaDao {
     @Insert suspend fun inserirItens(itens: List<ItemNotaEntity>)
     @Insert suspend fun inserirPagamentos(pagamentos: List<PagamentoEntity>)
     @Query("SELECT * FROM notas_fiscais WHERE chave = :chave LIMIT 1") suspend fun porChave(chave: String): NotaFiscalEntity?
+    @Query("DELETE FROM notas_fiscais WHERE id = :notaId") suspend fun excluirNota(notaId: Long): Int
     @Transaction @Query("SELECT * FROM notas_fiscais ORDER BY importadaEm DESC") fun observarNotas(): Flow<List<NotaComItens>>
     @Query("SELECT * FROM itens_nota WHERE notaId = :notaId ORDER BY id") suspend fun itensDaNota(notaId: Long): List<ItemNotaEntity>
     @Query("SELECT COUNT(*) FROM itens_nota WHERE categoriaId = :categoriaId") suspend fun contarItensDaCategoria(categoriaId: Long): Int

@@ -2,6 +2,9 @@ package br.com.feira.nfce
 
 import android.content.Intent
 import android.os.Bundle
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -22,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -60,6 +64,13 @@ class MainActivity : ComponentActivity() {
                 val words by viewModel.keywords.collectAsState()
                 val overrides by viewModel.overrides.collectAsState()
                 val categoryMove by viewModel.categoryMove.collectAsState()
+                val qrTest by viewModel.qrTest.collectAsState()
+                val scannerOptions = remember {
+                    GmsBarcodeScannerOptions.Builder()
+                        .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                        .build()
+                }
+                val scanner = remember(this) { GmsBarcodeScanning.getClient(this, scannerOptions) }
                 var screen by remember { mutableStateOf("Início") }
                 val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
                     if (uri != null) viewModel.importar(uri, contentResolver)
@@ -67,21 +78,28 @@ class MainActivity : ComponentActivity() {
                 Scaffold(topBar = { TopAppBar(title = { Text("Feira NFC-e") }) }) { padding ->
                     Column(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf("Início", "Categorias").forEach { tab ->
+                            listOf("Início", "Categorias", "Teste QR").forEach { tab ->
                                 if (screen == tab) Button(onClick = { screen = tab }) { Text(tab) }
                                 else OutlinedButton(onClick = { screen = tab }) { Text(tab) }
                             }
                         }
                         Spacer(Modifier.height(10.dp))
                         when {
-                            screen == "Categorias" -> CategoryScreen(categories, words, overrides, categoryMove, viewModel)
+                            screen == "Teste QR" -> QrTestScreen(qrTest, Modifier.weight(1f)) {
+                                scanner.startScan()
+                                    .addOnSuccessListener { barcode -> viewModel.consultarQrCode(barcode.rawValue) }
+                                    .addOnFailureListener { viewModel.scannerQrFalhou() }
+                            }
+                            screen == "Categorias" -> CategoryScreen(categories, words, overrides, categoryMove, viewModel, Modifier.weight(1f))
                             state.nota != null && state.sucesso() -> ImportSuccess(state.aviso, onNew = { viewModel.limparRevisao() })
                             state.nota != null -> ReviewScreen(state, categories.filter { it.ativa }, viewModel)
                             else -> HomeScreen(
                                 state = state,
                                 notes = notes,
                                 onImport = { filePicker.launch(arrayOf("text/html", "text/*", "application/octet-stream", "*/*")) },
-                                onExport = { note -> share(viewModel.exportar(note)) }
+                                onExport = { note -> share(viewModel.exportar(note)) },
+                                onDelete = viewModel::excluirNota,
+                                modifier = Modifier.weight(1f)
                             )
                         }
                     }
@@ -100,6 +118,46 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@Composable
+private fun QrTestScreen(state: QrTestUiState, modifier: Modifier = Modifier, onScan: () -> Unit) {
+    Column(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Teste de consulta NFC-e", style = MaterialTheme.typography.titleLarge)
+        Text("Leia o QR Code impresso na NFC-e. O conteúdo e a chave não serão exibidos nem gravados em Logcat.")
+        Button(onClick = onScan, enabled = !state.carregando) { Text("Escanear QR Code") }
+        Text(
+            when {
+                !state.qrLido -> "QR Code: aguardando leitura"
+                state.nfceAmReconhecida -> "QR Code: NFC-e do Amazonas reconhecida"
+                else -> "QR Code: lido, mas não reconhecido como NFC-e do Amazonas"
+            },
+            style = MaterialTheme.typography.bodyLarge
+        )
+        state.usaHttps?.let {
+            Text("Transporte: ${if (it) "HTTPS" else "HTTP (sem criptografia)"}")
+        }
+        if (state.carregando) {
+            CircularProgressIndicator()
+            Text("Consultando diretamente a SEFAZ-AM…")
+        }
+        state.statusHttp?.let { Text("Código HTTP: $it") }
+        state.tipoConteudo?.let { Text("Content-Type: $it") }
+        state.bytesRecebidos?.let { Text("Bytes recebidos: $it") }
+        if (state.statusHttp != null) Text(
+            "Redirecionamento: " + when {
+                !state.redirecionada -> "não detectado"
+                state.redirecionamentoBloqueado -> "detectado e bloqueado"
+                else -> "detectado e seguido no domínio autorizado"
+            }
+        )
+        state.html?.let { Text("Conteúdo HTML: ${if (it) "sim" else "não"}") }
+        state.estruturaNfce?.let { Text("Estrutura de NFC-e: ${if (it) "encontrada" else "não encontrada"}") }
+        state.produtosIdentificados?.let { Text("Produtos encontrados pelos seletores: $it") }
+        state.produtosComCamposCompletos?.let { Text("Produtos com quantidade, unidade e valores: $it") }
+        state.parserAceitouHtml?.let { Text("Parser AM: ${if (it) "aceitou o HTML" else "não conseguiu interpretar"}") }
+        state.mensagem?.let { Text(it, color = if (state.parserAceitouHtml == false || !state.nfceAmReconhecida) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface) }
+    }
+}
+
 private fun RevisaoUiState.sucesso() = salvo
 
 @Composable
@@ -107,23 +165,40 @@ private fun HomeScreen(
     state: RevisaoUiState,
     notes: List<br.com.feira.nfce.notas.data.NotaComItens>,
     onImport: () -> Unit,
-    onExport: (br.com.feira.nfce.notas.data.NotaComItens) -> Unit
+    onExport: (br.com.feira.nfce.notas.data.NotaComItens) -> Unit,
+    onDelete: (Long) -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    Column(Modifier.fillMaxSize()) {
+    var noteToDelete by remember { mutableStateOf<br.com.feira.nfce.notas.data.NotaComItens?>(null) }
+    noteToDelete?.let { note ->
+        AlertDialog(
+            onDismissRequest = { noteToDelete = null },
+            title = { Text("Excluir nota fiscal?") },
+            text = { Text("Tem certeza de que deseja excluir esta nota fiscal? Os produtos e pagamentos associados a ela também serão removidos.") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(note.nota.id); noteToDelete = null }) { Text("Excluir") }
+            },
+            dismissButton = { TextButton(onClick = { noteToDelete = null }) { Text("Cancelar") } }
+        )
+    }
+    Column(modifier.fillMaxSize()) {
         Text("Importe um arquivo HTML ou MHTML salvo da consulta NFC-e da SEFAZ-AM. O processamento acontece no aparelho.", style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(12.dp))
         Button(onClick = onImport, enabled = !state.carregando) { Text(if (state.carregando) "Lendo arquivo…" else "Importar nota") }
         state.erro?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp)) }
         HorizontalDivider(Modifier.padding(vertical = 12.dp))
         Text("Notas importadas", style = MaterialTheme.typography.titleLarge)
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(notes, key = { it.nota.id }) { note ->
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
                         Text(note.nota.emitente, style = MaterialTheme.typography.titleMedium)
                         Text("CNPJ ${note.nota.cnpj} · ${note.nota.dataEmissao.orEmpty()}")
                         Text("Total R$ ${note.nota.total} · ${note.itens.size} produtos")
-                        TextButton(onClick = { onExport(note) }) { Text("Exportar JSON") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { onExport(note) }) { Text("Exportar JSON") }
+                            TextButton(onClick = { noteToDelete = note }) { Text("Excluir nota") }
+                        }
                     }
                 }
             }
@@ -188,7 +263,8 @@ private fun CategoryScreen(
     words: List<br.com.feira.nfce.categorias.data.entities.PalavraChaveEntity>,
     overrides: List<br.com.feira.nfce.categorias.data.entities.ProductOverrideEntity>,
     categoryMove: CategoryMoveRequest?,
-    vm: MainViewModel
+    vm: MainViewModel,
+    modifier: Modifier = Modifier
 ) {
     var newCategory by remember { mutableStateOf("") }
     var word by remember { mutableStateOf("") }
@@ -218,7 +294,7 @@ private fun CategoryScreen(
             dismissButton = { TextButton(onClick = vm::cancelarDesativacao) { Text("Cancelar") } }
         )
     }
-    LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Text("Gerenciar categorias", style = MaterialTheme.typography.titleLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -226,7 +302,7 @@ private fun CategoryScreen(
                 Button(onClick = { vm.criarCategoria(newCategory); newCategory = "" }) { Text("Criar") }
             }
         }
-        items(categories, key = { it.id }) { category ->
+        items(categories, key = { "categoria-${it.id}" }) { category ->
             var editing by remember(category.id) { mutableStateOf(category.nome) }
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(10.dp)) {
@@ -254,7 +330,7 @@ private fun CategoryScreen(
             }
         }
         item { Text("Palavras-chave", style = MaterialTheme.typography.titleMedium) }
-        items(words, key = { it.id }) { item ->
+        items(words, key = { "palavra-${it.id}" }) { item ->
             val categoryName = categories.firstOrNull { it.id == item.categoriaId }?.nome ?: "Categoria removida"
             var term by remember(item.id, item.termo) { mutableStateOf(item.termo) }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -271,7 +347,7 @@ private fun CategoryScreen(
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
             Text("Correções aprendidas", style = MaterialTheme.typography.titleMedium)
         }
-        items(overrides, key = { it.id }) { override ->
+        items(overrides, key = { "override-${it.id}" }) { override ->
             val categoryName = categories.firstOrNull { it.id == override.categoriaId }?.nome ?: "Categoria indisponível"
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("${override.descricaoOriginal} → $categoryName")

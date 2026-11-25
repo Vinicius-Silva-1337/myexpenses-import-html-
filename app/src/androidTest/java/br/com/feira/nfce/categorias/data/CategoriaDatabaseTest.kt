@@ -10,6 +10,9 @@ import br.com.feira.nfce.categorias.domain.Normalizador
 import br.com.feira.nfce.categorias.data.entities.ProductOverrideEntity
 import br.com.feira.nfce.notas.data.ItemEmRevisao
 import br.com.feira.nfce.notas.data.NotaRepository
+import br.com.feira.nfce.notas.data.NotaFiscalEntity
+import br.com.feira.nfce.notas.data.ItemNotaEntity
+import br.com.feira.nfce.notas.data.PagamentoEntity
 import br.com.feira.nfce.notas.model.ItemNota
 import br.com.feira.nfce.notas.model.NotaFiscal
 import br.com.feira.nfce.notas.model.Validacao
@@ -85,5 +88,51 @@ class CategoriaDatabaseTest {
         assertEquals(1, db.notaDao().itensDaNota(1).size)
         assertEquals(custom, db.productOverrideDao().buscar(Normalizador.normalizar("PRODUTO DESCONHECIDO"))?.categoriaId)
         assertFalse(repo.salvar(note, review, setOf(0)))
+    }
+
+    @Test fun deletingInvoiceCascadesOnlyItsItemsAndPayments() = runBlocking {
+        CategoriaSeeder(context, db).inicializar()
+        val category = db.categoriaDao().porNome("Limpeza")!!
+        val beforeCategories = db.categoriaDao().observarTodas().first().size
+        val beforeKeywords = db.palavraChaveDao().observarTodas().first().size
+        val overrideId = db.productOverrideDao().salvar(
+            ProductOverrideEntity(
+                descricaoOriginal = "Detergente aprendido",
+                descricaoNormalizada = Normalizador.normalizar("Detergente aprendido"),
+                categoriaId = category.id,
+                dataCriacao = 1
+            )
+        )
+
+        fun invoice(key: String) = NotaFiscalEntity(
+            chave = key, cnpj = "12345678000190", emitente = "Mercado", numero = key,
+            serie = "1", dataEmissao = null, total = "10.00", somaItensConfere = true,
+            somaItens = "10.00", qtdItensConfere = true, chaveValida = true, importadaEm = 1
+        )
+        fun item(invoiceId: Long, description: String) = ItemNotaEntity(
+            notaId = invoiceId, descricao = description, codigo = null, quantidade = "1",
+            unidade = "UN", valorUnitario = "5.00", valorTotal = "5.00",
+            categoriaId = category.id, categoriaOrigem = "REGRA", identificacaoAmbigua = false
+        )
+
+        val dao = db.notaDao()
+        val deletedId = dao.inserirNota(invoice("chave-excluir"))
+        val retainedId = dao.inserirNota(invoice("chave-manter"))
+        dao.inserirItens(listOf(item(deletedId, "Produto 1"), item(deletedId, "Produto 2"), item(retainedId, "Produto de outra nota")))
+        dao.inserirPagamentos(listOf(PagamentoEntity(notaId = deletedId, forma = "Dinheiro", valor = "10.00")))
+
+        val repository = NotaRepository(db, Categorizador(db.categoriaDao(), db.palavraChaveDao(), db.productOverrideDao()))
+        assertTrue(repository.excluirNota(deletedId))
+
+        val remaining = dao.observarNotas().first()
+        assertEquals(listOf(retainedId), remaining.map { it.nota.id })
+        assertEquals("Produto de outra nota", remaining.single().itens.single().descricao)
+        assertTrue(dao.itensDaNota(deletedId).isEmpty())
+        assertEquals(0L, db.openHelper.readableDatabase.query(
+            "SELECT COUNT(*) FROM pagamentos WHERE notaId = ?", arrayOf(deletedId.toString())
+        ).use { cursor -> cursor.moveToFirst(); cursor.getLong(0) })
+        assertEquals(beforeCategories, db.categoriaDao().observarTodas().first().size)
+        assertEquals(beforeKeywords, db.palavraChaveDao().observarTodas().first().size)
+        assertEquals(overrideId, db.productOverrideDao().buscar(Normalizador.normalizar("Detergente aprendido"))?.id)
     }
 }

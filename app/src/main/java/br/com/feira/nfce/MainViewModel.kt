@@ -19,6 +19,9 @@ import br.com.feira.nfce.notas.importacao.ImportadorNota
 import br.com.feira.nfce.notas.model.NotaFiscal
 import br.com.feira.nfce.notas.parser.ParserNfceException
 import br.com.feira.nfce.notas.data.ItemEmRevisao
+import br.com.feira.nfce.notas.consulta.NfceQrUrlException
+import br.com.feira.nfce.notas.consulta.NfceQrUrlValidator
+import br.com.feira.nfce.notas.consulta.SefazNfceClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,13 +45,34 @@ data class RevisaoUiState(
 
 data class CategoryMoveRequest(val category: CategoriaEntity, val affectedItems: Int)
 
+data class QrTestUiState(
+    val qrLido: Boolean = false,
+    val nfceAmReconhecida: Boolean = false,
+    val usaHttps: Boolean? = null,
+    val carregando: Boolean = false,
+    val statusHttp: Int? = null,
+    val tipoConteudo: String? = null,
+    val bytesRecebidos: Int? = null,
+    val redirecionada: Boolean = false,
+    val redirecionamentoBloqueado: Boolean = false,
+    val html: Boolean? = null,
+    val estruturaNfce: Boolean? = null,
+    val produtosIdentificados: Int? = null,
+    val produtosComCamposCompletos: Int? = null,
+    val parserAceitouHtml: Boolean? = null,
+    val mensagem: String? = null
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val database = AppDatabase.get(application)
     private val categorizador = Categorizador(database.categoriaDao(), database.palavraChaveDao(), database.productOverrideDao())
     private val repository = NotaRepository(database, categorizador)
     private val _state = MutableStateFlow(RevisaoUiState())
     private val _categoryMove = MutableStateFlow<CategoryMoveRequest?>(null)
+    private val _qrTest = MutableStateFlow(QrTestUiState())
+    private val sefazClient = SefazNfceClient()
     val categoryMove: StateFlow<CategoryMoveRequest?> = _categoryMove.asStateFlow()
+    val qrTest: StateFlow<QrTestUiState> = _qrTest.asStateFlow()
     private val seedComplete = CompletableDeferred<Unit>()
     val state: StateFlow<RevisaoUiState> = _state.asStateFlow()
     val categorias = database.categoriaDao().observarTodas().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -128,6 +152,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun limparRevisao() { _state.value = RevisaoUiState() }
+
+    fun scannerQrFalhou() {
+        _qrTest.value = QrTestUiState(mensagem = "Não foi possível iniciar o leitor de QR Code. Verifique o Google Play Services e tente novamente.")
+    }
+
+    fun consultarQrCode(rawValue: String?) {
+        if (rawValue.isNullOrBlank()) {
+            _qrTest.value = QrTestUiState(qrLido = true, mensagem = "O QR Code não contém texto legível.")
+            return
+        }
+        val validated = try {
+            NfceQrUrlValidator.validate(rawValue)
+        } catch (error: NfceQrUrlException) {
+            _qrTest.value = QrTestUiState(qrLido = true, mensagem = error.message)
+            return
+        }
+        _qrTest.value = QrTestUiState(
+            qrLido = true,
+            nfceAmReconhecida = true,
+            usaHttps = validated.usesHttps,
+            carregando = true,
+            mensagem = "NFC-e do Amazonas reconhecida. Consultando a SEFAZ…"
+        )
+        viewModelScope.launch {
+            try {
+                val result = sefazClient.fetch(validated)
+                val inspection = result.htmlInspection
+                val message = when {
+                    result.redirectBlocked -> "A SEFAZ redirecionou para um endereço não autorizado; o redirecionamento foi bloqueado."
+                    result.statusCode !in 200..299 -> "A SEFAZ respondeu com erro HTTP."
+                    result.responseBytes == 0 -> "A resposta da SEFAZ veio vazia."
+                    inspection == null || !inspection.isHtml -> "A resposta recebida não é HTML."
+                    inspection.parserAccepted -> "HTML de NFC-e reconhecido; o parser AM identificou ${inspection.productCount} produto(s)."
+                    inspection.hasNfceStructure -> "A página contém estrutura de NFC-e, mas o parser AM não conseguiu interpretá-la por completo."
+                    else -> "O HTML recebido não corresponde à estrutura esperada de uma NFC-e do Amazonas."
+                }
+                _qrTest.value = QrTestUiState(
+                    qrLido = true,
+                    nfceAmReconhecida = true,
+                    usaHttps = validated.usesHttps,
+                    statusHttp = result.statusCode,
+                    tipoConteudo = result.contentType,
+                    bytesRecebidos = result.responseBytes,
+                    redirecionada = result.redirected,
+                    redirecionamentoBloqueado = result.redirectBlocked,
+                    html = inspection?.isHtml,
+                    estruturaNfce = inspection?.hasNfceStructure,
+                    produtosIdentificados = inspection?.productCount,
+                    produtosComCamposCompletos = inspection?.completeProductCount,
+                    parserAceitouHtml = inspection?.parserAccepted,
+                    mensagem = message
+                )
+            } catch (_: Exception) {
+                _qrTest.value = QrTestUiState(
+                    qrLido = true,
+                    nfceAmReconhecida = true,
+                    mensagem = "Não foi possível consultar a SEFAZ. Verifique a conexão e tente novamente."
+                )
+            }
+        }
+    }
+
+    fun excluirNota(notaId: Long) = viewModelScope.launch(Dispatchers.IO) {
+        repository.excluirNota(notaId)
+    }
 
     fun criarCategoria(nome: String) = viewModelScope.launch(Dispatchers.IO) {
         if (nome.isBlank()) return@launch
