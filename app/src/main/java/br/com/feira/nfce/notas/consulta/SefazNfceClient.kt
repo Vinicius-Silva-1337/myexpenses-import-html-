@@ -16,7 +16,8 @@ data class SefazHttpInspection(
     val responseBytes: Int,
     val redirected: Boolean,
     val htmlInspection: NfceHtmlInspection?,
-    val redirectBlocked: Boolean = false
+    val redirectBlocked: Boolean = false,
+    val finalUsesHttps: Boolean? = null
 )
 
 class SefazNfceClient(
@@ -28,12 +29,13 @@ class SefazNfceClient(
 
     private fun fetchFollowingAuthorizedRedirects(original: ValidatedNfceQr): SefazHttpInspection {
         var currentUrl = original.requestUrl
+        var currentUsesHttps = original.usesHttps
         var redirected = false
         repeat(MAX_REDIRECTS + 1) { followed ->
             val request = Request.Builder().url(currentUrl).get().build()
             val response = httpClient.newCall(request).execute()
             if (response.code !in 300..399) {
-                return response.use(::inspectResponse).copy(redirected = redirected)
+                return response.use(::inspectResponse).copy(redirected = redirected, finalUsesHttps = currentUsesHttps)
             }
             redirected = true
             val code = response.code
@@ -43,11 +45,13 @@ class SefazNfceClient(
             val target = destination?.let { runCatching { NfceQrUrlValidator.validate(it) }.getOrNull() }
             val safe = target != null &&
                 target.accessKey == original.accessKey &&
+                target.homologation == original.homologation &&
                 !(original.usesHttps && !target.usesHttps)
             if (!safe || followed == MAX_REDIRECTS) {
                 return SefazHttpInspection(code, contentType, 0, redirected, null, redirectBlocked = true)
             }
             currentUrl = target.requestUrl
+            currentUsesHttps = target.usesHttps
         }
         error("Fluxo de redirecionamento inválido")
     }

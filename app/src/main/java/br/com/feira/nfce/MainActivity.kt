@@ -135,6 +135,9 @@ private fun QrTestScreen(state: QrTestUiState, modifier: Modifier = Modifier, on
         state.usaHttps?.let {
             Text("Transporte: ${if (it) "HTTPS" else "HTTP (sem criptografia)"}")
         }
+        state.respostaUsaHttps?.let {
+            Text("Transporte da resposta final: ${if (it) "HTTPS" else "HTTP (sem criptografia)"}")
+        }
         if (state.carregando) {
             CircularProgressIndicator()
             Text("Consultando diretamente a SEFAZ-AM…")

@@ -44,11 +44,13 @@ class QrAndSefazInspectionTest {
         val httpWrongHost = "http://example.invalid/nfceweb/consultarNFCe.jsp?p=$key"
         val wrongHost = "https://example.invalid/nfceweb/consultarNFCe.jsp?p=$key"
         val wrongPath = "https://${NfceQrUrlValidator.AUTHORIZED_HOST}/outro?p=$key"
+        val unsafeScheme = "file://${NfceQrUrlValidator.AUTHORIZED_HOST}/nfceweb/consultarNFCe.jsp?p=$key"
         val invalidKey = "${key.dropLast(1)}${if (key.last() == '0') '1' else '0'}"
 
         assertThrows(NfceQrUrlException::class.java) { NfceQrUrlValidator.validate(httpWrongHost) }
         assertThrows(NfceQrUrlException::class.java) { NfceQrUrlValidator.validate(wrongHost) }
         assertThrows(NfceQrUrlException::class.java) { NfceQrUrlValidator.validate(wrongPath) }
+        assertThrows(NfceQrUrlException::class.java) { NfceQrUrlValidator.validate(unsafeScheme) }
         assertThrows(NfceQrUrlException::class.java) {
             NfceQrUrlValidator.validate("https://${NfceQrUrlValidator.AUTHORIZED_HOST}/nfceweb/consultarNFCe.jsp?p=$invalidKey")
         }
