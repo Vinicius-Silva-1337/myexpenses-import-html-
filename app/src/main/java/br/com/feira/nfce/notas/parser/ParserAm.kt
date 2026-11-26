@@ -20,7 +20,7 @@ object ParserAm {
 
     fun parse(bytes: ByteArray): NotaFiscal = parseHtml(Decodificador.decodificar(bytes))
 
-    fun parseHtml(html: String): NotaFiscal {
+    fun parseHtml(html: String, expectedAccessKey: String? = null): NotaFiscal {
         if (html.isBlank()) throw ParserNfceException("html_sem_itens", "O arquivo está vazio.")
         val document = Jsoup.parse(html)
         val rows = document.select("table#tabResult tr")
@@ -48,7 +48,15 @@ object ParserAm {
 
         val keyText = document.selectFirst("span.chave")?.text().orEmpty()
         val keyFromSelector = Chave.digitos(keyText).takeIf { it.length == 44 }
-        val key = keyFromSelector ?: keyPattern.find(keyText)?.groupValues?.get(1)
+        val pageKey = keyFromSelector ?: keyPattern.find(keyText)?.groupValues?.get(1)
+        val expectedKey = expectedAccessKey?.let(Chave::digitos)?.takeIf { it.length == 44 }
+        if (expectedAccessKey != null && expectedKey == null) {
+            throw ParserNfceException("chave_url_invalida", "A chave informada pela consulta é inválida.")
+        }
+        if (pageKey != null && expectedKey != null && pageKey != expectedKey) {
+            throw ParserNfceException("chave_divergente", "A chave exibida no HTML não corresponde à chave do QR Code.")
+        }
+        val key = pageKey ?: expectedKey
             ?: throw ParserNfceException("chave_ausente", "A chave de acesso não foi encontrada.")
         val keyParts = Chave.decompor(key)
         val infosText = document.selectFirst("#infos")?.text().orEmpty()
@@ -58,8 +66,19 @@ object ParserAm {
                     .atOffset(ZoneOffset.ofHours(-4))
             }.getOrNull()
         }
-        val count = Regex("(?i)(\\d+)\\s+item(?:s)?").find(infosText)?.groupValues?.get(1)?.toIntOrNull()
+        val count = findSummaryCount(totalRegion)
+            ?: Regex("(?i)(\\d+)\\s+item(?:s)?").find(infosText)?.groupValues?.get(1)?.toIntOrNull()
         val sum = items.fold(BigDecimal.ZERO) { acc, item -> acc.add(item.valorTotal) }
+        val totalProducts = summaryAmount(totalRegion) { label ->
+            label.contains("valor total dos produtos") || label.contains("total dos produtos") || label.contains("valor produtos")
+        }
+        val discounts = sumSummaryAmounts(totalRegion) { it.contains("desconto") }
+        val additions = sumSummaryAmounts(totalRegion) {
+            it.contains("acréscimo") || it.contains("acrescimo") || it.contains("frete") ||
+                it.contains("seguro") || it.contains("outras despesas")
+        }
+        val paid = summaryAmount(totalRegion) { it.contains("valor pago") || it.contains("valor efetivamente pago") }
+        val change = summaryAmount(totalRegion) { it.contains("troco") }
         val paymentRows = totalRegion.select("label.tx").mapNotNull { label ->
             val form = label.nfceText().takeIf { it.isNotBlank() && !it.contains("troco", true) && !it.contains("valor pago", true) }
                 ?: return@mapNotNull null
@@ -68,6 +87,38 @@ object ParserAm {
                 ?: label.parent()?.nextElementSibling()?.selectFirst("span.totalNumb")
             valueEl?.let { Pagamento(form, runCatching { Numeros.brasileiro(it.text()) }.getOrNull() ?: return@mapNotNull null) }
         }.distinct()
+        val invalidSummaryFields = invalidSummaryAmounts(totalRegion)
+        val invalidPaymentForms = invalidPaymentAmounts(totalRegion)
+        val inconsistentItemTotals = items.mapIndexedNotNull { index, item ->
+            val computedTotal = item.quantidade.multiply(item.valorUnitario)
+            (index + 1).takeIf { computedTotal.subtract(item.valorTotal).abs() > BigDecimal("0.01") }
+        }
+
+        val expectedProducts = totalProducts ?: sum
+        val adjustedExpectedTotal = expectedProducts
+            .subtract(discounts ?: BigDecimal.ZERO)
+            .add(additions ?: BigDecimal.ZERO)
+        val totalDifference = adjustedExpectedTotal.subtract(total)
+        val productsDifference = totalProducts?.let { sum.subtract(it) }
+        val productTotalsMatch = productsDifference?.abs()?.let { it <= BigDecimal("0.01") }
+        val totalMatches = (productTotalsMatch != false) && totalDifference.abs() <= BigDecimal("0.01")
+        val requiredMissing = buildList {
+            if (emission == null) add("Data de emissão")
+            if (count == null) add("Quantidade total de itens")
+        }
+        val warnings = buildList {
+            if (requiredMissing.isNotEmpty()) add("Campos obrigatórios ausentes: ${requiredMissing.joinToString()}.")
+            if (count != null && count != items.size) add("O documento informa $count item(ns), mas ${items.size} produto(s) foram extraídos.")
+            if (productTotalsMatch == false) add("A soma dos itens difere do total de produtos informado em R$ ${productsDifference.abs().toPlainString()}.")
+            if (totalDifference.abs() > BigDecimal("0.01")) add("A soma dos produtos ajustada por descontos e acréscimos difere do valor a pagar em R$ ${totalDifference.abs().toPlainString()}.")
+            if (inconsistentItemTotals.isNotEmpty()) add("Quantidade multiplicada pelo valor unitário diverge do total nos produtos: ${inconsistentItemTotals.joinToString()}.")
+            if (invalidSummaryFields.isNotEmpty()) add("Valores financeiros inválidos: ${invalidSummaryFields.joinToString()}.")
+            if (invalidPaymentForms.isNotEmpty()) add("Valor inválido no pagamento: ${invalidPaymentForms.joinToString()}.")
+            if (!Chave.validar(key)) add("A chave de acesso não passou na validação do dígito verificador.")
+            if (paid != null && change != null && paid.subtract(change).subtract(total).abs() > BigDecimal("0.01")) {
+                add("Valor pago menos troco difere do valor a pagar.")
+            }
+        }
 
         return NotaFiscal(
             chave = key,
@@ -80,12 +131,80 @@ object ParserAm {
             pagamentos = paymentRows,
             itens = items,
             validacao = Validacao(
-                somaItensConfereComTotal = sum.subtract(total).abs() <= BigDecimal("0.01"),
+                somaItensConfereComTotal = totalMatches,
                 somaItens = sum,
                 qtdItensConfere = count?.let { it == items.size },
-                chaveValida = Chave.validar(key)
-            )
+                chaveValida = Chave.validar(key),
+                somaItensConfereComProdutos = productTotalsMatch,
+                diferencaItensTotal = totalDifference,
+                camposObrigatoriosAusentes = requiredMissing,
+                avisos = warnings
+            ),
+            totalProdutos = totalProducts,
+            descontos = discounts,
+            acrescimos = additions,
+            valorPago = paid,
+            troco = change,
+            quantidadeItensInformada = count
         )
+    }
+
+    private fun findSummaryCount(region: Element): Int? {
+        val flatText = region.nfceText()
+        val value = Regex("(?i)(?:qtd\\.?\\s*total\\s*de\\s*itens?|quantidade\\s*total\\s*de\\s*itens?)\\s*:?\\s*(\\d+)")
+            .find(flatText)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (value != null) return value
+
+        val label = region.select("label").firstOrNull {
+            val text = it.nfceText().lowercase()
+            (text.contains("qtd") && text.contains("item")) || text.contains("quantidade total de itens")
+        } ?: return null
+        val valueElement = label.nextElementSibling()?.takeIf { it.`is`("span.totalNumb") }
+            ?: label.parent()?.selectFirst("span.totalNumb")
+            ?: return null
+        return valueElement.text().trim().toIntOrNull()
+    }
+
+    private fun summaryAmount(region: Element, matches: (String) -> Boolean): BigDecimal? =
+        region.select("label").firstOrNull { matches(it.nfceText().lowercase()) }?.let(::amountForLabel)
+
+    private fun sumSummaryAmounts(region: Element, matches: (String) -> Boolean): BigDecimal? {
+        val values = region.select("label").filter { matches(it.nfceText().lowercase()) }.mapNotNull(::amountForLabel)
+        return values.takeIf { it.isNotEmpty() }?.fold(BigDecimal.ZERO, BigDecimal::add)
+    }
+
+    private fun invalidSummaryAmounts(region: Element): List<String> = region.select("label")
+        .filter { label ->
+            val text = label.nfceText().lowercase()
+            text.contains("valor total dos produtos") || text.contains("total dos produtos") || text.contains("valor produtos") ||
+                text.contains("desconto") || text.contains("acréscimo") || text.contains("acrescimo") ||
+                text.contains("frete") || text.contains("seguro") || text.contains("outras despesas") ||
+                text.contains("valor pago") || text.contains("valor efetivamente pago") || text.contains("troco")
+        }
+        .mapNotNull { label ->
+            val value = summaryValueElement(label) ?: return@mapNotNull null
+            if (runCatching { Numeros.brasileiro(value.text()) }.isSuccess) return@mapNotNull null
+            if (label.nfceText().contains("troco", true) && value.text().trim().equals("NaN", true)) return@mapNotNull null
+            label.nfceText().substringBefore(':').trim().ifBlank { "campo financeiro" }
+        }
+        .distinct()
+
+    private fun invalidPaymentAmounts(region: Element): List<String> = region.select("label.tx")
+        .filterNot { it.nfceText().contains("troco", true) || it.nfceText().contains("valor pago", true) }
+        .mapNotNull { label ->
+            val value = summaryValueElement(label) ?: return@mapNotNull null
+            if (runCatching { Numeros.brasileiro(value.text()) }.isSuccess) null else label.nfceText()
+        }
+        .distinct()
+
+    private fun summaryValueElement(label: Element): Element? =
+        label.parent()?.selectFirst("span.totalNumb")
+            ?: label.nextElementSibling()?.takeIf { it.`is`("span.totalNumb") }
+            ?: label.parent()?.nextElementSibling()?.selectFirst("span.totalNumb")
+
+    private fun amountForLabel(label: Element): BigDecimal? {
+        val value = summaryValueElement(label) ?: return null
+        return runCatching { Numeros.brasileiro(value.text()) }.getOrNull()
     }
 
     private fun parseItem(row: Element, rowNumber: Int): ItemNota = try {

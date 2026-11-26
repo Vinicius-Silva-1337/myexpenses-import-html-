@@ -19,7 +19,7 @@ Para teste manual, abra o app, toque em **Importar nota**, escolha um HTML/MHTML
 
 ## Room, categorias e categorizador
 
-`CategorizadorRulesTest` cobre normalização, limites de palavra, frases, prioridade, colisões e categorias de segmentos distintos. `CategoriaDatabaseTest` cria o banco Room em memória e verifica inicialização idempotente, preservação de categoria personalizada, substituição/exclusão de ProductOverride e persistência do fluxo nota → revisão → correção aprendida → nova consulta.
+`CategorizadorRulesTest` cobre normalização, limites de palavra, frases, prioridade, colisões e categorias de segmentos distintos. `CategoriaDatabaseTest` cria o banco Room em memória e verifica inicialização idempotente, preservação de categoria personalizada, substituição/exclusão de ProductOverride e persistência do fluxo nota → revisão → correção aprendida → nova consulta. `NotaPersistenciaTest` verifica persistência após fechar/reabrir o banco, duplicidade pela chave, gravação de vários produtos/pagamentos, exclusão em cascata e preservação de categorias, palavras e correções aprendidas.
 
 Para compilar os testes instrumentados, use `./gradlew assembleDebugAndroidTest`. Com emulador ou dispositivo conectado, execute `./gradlew connectedDebugAndroidTest`.
 

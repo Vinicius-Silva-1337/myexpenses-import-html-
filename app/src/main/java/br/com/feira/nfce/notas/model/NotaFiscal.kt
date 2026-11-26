@@ -13,7 +13,13 @@ data class NotaFiscal(
     val total: BigDecimal,
     val pagamentos: List<Pagamento>,
     val itens: List<ItemNota>,
-    val validacao: Validacao
+    val validacao: Validacao,
+    val totalProdutos: BigDecimal? = null,
+    val descontos: BigDecimal? = null,
+    val acrescimos: BigDecimal? = null,
+    val valorPago: BigDecimal? = null,
+    val troco: BigDecimal? = null,
+    val quantidadeItensInformada: Int? = null
 )
 
 data class ItemNota(
@@ -31,5 +37,9 @@ data class Validacao(
     val somaItensConfereComTotal: Boolean,
     val somaItens: BigDecimal,
     val qtdItensConfere: Boolean?,
-    val chaveValida: Boolean
+    val chaveValida: Boolean,
+    val somaItensConfereComProdutos: Boolean? = null,
+    val diferencaItensTotal: BigDecimal = BigDecimal.ZERO,
+    val camposObrigatoriosAusentes: List<String> = emptyList(),
+    val avisos: List<String> = emptyList()
 )

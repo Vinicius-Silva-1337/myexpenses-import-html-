@@ -35,7 +35,7 @@ class SefazNfceClient(
             val request = Request.Builder().url(currentUrl).get().build()
             val response = httpClient.newCall(request).execute()
             if (response.code !in 300..399) {
-                return response.use(::inspectResponse).copy(redirected = redirected, finalUsesHttps = currentUsesHttps)
+                return response.use { inspectResponse(it, original.accessKey) }.copy(redirected = redirected, finalUsesHttps = currentUsesHttps)
             }
             redirected = true
             val code = response.code
@@ -56,7 +56,7 @@ class SefazNfceClient(
         error("Fluxo de redirecionamento inválido")
     }
 
-    internal fun inspectResponse(response: Response): SefazHttpInspection {
+    internal fun inspectResponse(response: Response, expectedAccessKey: String? = null): SefazHttpInspection {
         val contentType = response.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase()
         val redirected = response.code in 300..399
         val body = response.body
@@ -69,7 +69,7 @@ class SefazNfceClient(
         }
         val charset: Charset = runCatching { body.contentType()?.charset(Charsets.UTF_8) }.getOrNull() ?: Charsets.UTF_8
         val html = bytes.toString(charset)
-        return SefazHttpInspection(response.code, contentType, bytes.size, false, SefazHtmlInspector.inspect(html, contentType))
+        return SefazHttpInspection(response.code, contentType, bytes.size, false, SefazHtmlInspector.inspect(html, contentType, expectedAccessKey))
     }
 
     private fun readAtMost(input: java.io.InputStream, maxBytes: Int): ByteArray {

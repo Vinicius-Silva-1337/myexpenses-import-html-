@@ -1,10 +1,13 @@
 package br.com.feira.nfce.notas.parser
 
+import br.com.feira.nfce.notas.importacao.ImportadorNota
 import org.junit.Assert.*
 import org.junit.Test
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.math.BigDecimal
+import java.io.File
+import java.security.MessageDigest
 
 class ParserAmTest {
     @Test fun parseOneItemKeepsOriginalDescriptionAndReportedTotal() {
@@ -69,6 +72,96 @@ class ParserAmTest {
         assertEquals("PIX", parsed.pagamentos.single().forma)
         assertEquals(BigDecimal("9.00"), parsed.pagamentos.single().valor)
         assertFalse(parsed.validacao.somaItensConfereComTotal)
+    }
+
+    @Test fun realSefazSnapshotMatchesPythonReferenceForEveryItemField() {
+        val referencePath = System.getenv("NFCE_REFERENCE_HTML")
+        org.junit.Assume.assumeTrue("Set NFCE_REFERENCE_HTML to run the local real-note comparison", !referencePath.isNullOrBlank())
+
+        val note = ImportadorNota.parse(File(referencePath!!).readBytes(), "referencia.html")
+        val canonicalItems = note.itens.joinToString("\n") { item ->
+            listOf(item.descricao, item.quantidade.toPlainString(), item.unidade, item.valorUnitario.toPlainString(), item.valorTotal.toPlainString())
+                .joinToString("\u001f")
+        }
+        val itemFingerprint = MessageDigest.getInstance("SHA-256")
+            .digest(canonicalItems.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+        assertEquals(24, note.itens.size)
+        assertEquals("19a8b67333e5fba23ddfd99df5e42576c8b7e3ae5acde2fb77be4098b4e59446", itemFingerprint)
+        assertEquals(BigDecimal("238.80"), note.total)
+        assertEquals(BigDecimal("238.80"), note.validacao.somaItens)
+        assertTrue(note.validacao.somaItensConfereComTotal)
+        assertTrue(note.validacao.avisos.isEmpty())
+        assertEquals(true, note.validacao.qtdItensConfere)
+        assertEquals("2026-11-20T18:56:11-04:00", note.dataEmissao.toString())
+        assertEquals("22965", note.numero)
+        assertEquals("12", note.serie)
+        assertEquals("Cartão de Débito", note.pagamentos.single().forma)
+        assertEquals(BigDecimal("238.80"), note.pagamentos.single().valor)
+    }
+
+    @Test fun usesQrAccessKeyOnlyWhenPageDoesNotProvideOneAndRejectsDifferentKey() {
+        val key = validKey()
+        val htmlWithoutKey = html(listOf(item("ITEM", "1", "1", "UN", "1,00", "1,00")), "1,00")
+            .replace("<span class=\"chave\">$key</span>", "")
+        assertEquals(key, ParserAm.parseHtml(htmlWithoutKey, key).chave)
+
+        val differentKey = validKey().dropLast(1) + if (validKey().last() == '0') "1" else "0"
+        val error = try {
+            ParserAm.parseHtml(html(listOf(item("ITEM", "1", "1", "UN", "1,00", "1,00")), "1,00"), differentKey)
+            fail("expected a QR/page key mismatch")
+            null
+        } catch (exception: ParserNfceException) {
+            exception
+        }
+        assertEquals("chave_divergente", error?.codigo)
+    }
+
+    @Test fun comparesItemsWithProductsDiscountsAndPayableWithoutChangingDocumentValues() {
+        val totalSection = """
+            <div id="totalNota">
+              <div><label>Qtd. total de itens:</label><span class="totalNumb">1</span></div>
+              <div><label>Valor total dos produtos:</label><span class="totalNumb">10,00</span></div>
+              <div><label>Desconto:</label><span class="totalNumb">1,00</span></div>
+              <div><label>Valor a pagar R$:</label><span class="totalNumb txtMax">9,00</span></div>
+            </div>
+        """.trimIndent()
+        val balanced = ParserAm.parseHtml(
+            html(listOf(item("ITEM", "1", "1", "UN", "10,00", "10,00")), "9,00")
+                .replace("<div id=\"totalNota\"><span class=\"totalNumb txtMax\">9,00</span></div>", totalSection)
+        )
+        assertEquals(BigDecimal("10.00"), balanced.totalProdutos)
+        assertEquals(BigDecimal("1.00"), balanced.descontos)
+        assertEquals(BigDecimal("9.00"), balanced.total)
+        assertTrue(balanced.validacao.somaItensConfereComProdutos == true)
+        assertTrue(balanced.validacao.somaItensConfereComTotal)
+        assertTrue(balanced.validacao.avisos.isEmpty())
+
+        val divergent = ParserAm.parseHtml(
+            html(listOf(item("ITEM", "1", "1", "UN", "10,00", "10,00")), "9,00")
+                .replace("<div id=\"totalNota\"><span class=\"totalNumb txtMax\">9,00</span></div>", totalSection.replace("9,00", "9,50"))
+        )
+        assertEquals(BigDecimal("9.50"), divergent.total)
+        assertEquals(BigDecimal("-0.50"), divergent.validacao.diferencaItensTotal)
+        assertFalse(divergent.validacao.somaItensConfereComTotal)
+        assertTrue(divergent.validacao.avisos.any { it.contains("difere do valor a pagar") })
+    }
+
+    @Test fun reportsInvalidOptionalFinancialValuesWithoutInventingAmounts() {
+        val invalidSummary = """
+            <div id="totalNota">
+              <div><label>Desconto:</label><span class="totalNumb">valor inválido</span></div>
+              <div><label>Valor a pagar R$:</label><span class="totalNumb txtMax">1,00</span></div>
+            </div>
+        """.trimIndent()
+        val parsed = ParserAm.parseHtml(
+            html(listOf(item("ITEM", "1", "1", "UN", "1,00", "1,00")), "1,00")
+                .replace("<div id=\"totalNota\"><span class=\"totalNumb txtMax\">1,00</span></div>", invalidSummary)
+        )
+
+        assertNull(parsed.descontos)
+        assertTrue(parsed.validacao.avisos.any { it.contains("Valores financeiros inválidos: Desconto") })
     }
 
     @Test fun mhtmlExtractsQuotedPrintableAndBase64Html() {

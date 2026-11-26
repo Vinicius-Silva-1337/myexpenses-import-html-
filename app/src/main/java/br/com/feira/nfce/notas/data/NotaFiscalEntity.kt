@@ -18,5 +18,11 @@ data class NotaFiscalEntity(
     val somaItens: String,
     val qtdItensConfere: Boolean?,
     val chaveValida: Boolean,
-    val importadaEm: Long
+    val importadaEm: Long,
+    val totalProdutos: String? = null,
+    val descontos: String? = null,
+    val acrescimos: String? = null,
+    val valorPago: String? = null,
+    val troco: String? = null,
+    val quantidadeItensInformada: Int? = null
 )

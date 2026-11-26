@@ -48,7 +48,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import br.com.feira.nfce.categorias.data.entities.CategoriaEntity
 import br.com.feira.nfce.categorias.domain.Normalizador
+import br.com.feira.nfce.notas.model.NotaFiscal
+import java.text.NumberFormat
 import java.math.BigDecimal
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -85,6 +88,21 @@ class MainActivity : ComponentActivity() {
                         }
                         Spacer(Modifier.height(10.dp))
                         when {
+                            screen == "Teste QR" && qrTest.notaConferencia != null -> NfceReviewScreen(
+                                qrTest.notaConferencia!!,
+                                Modifier.weight(1f),
+                                onBack = viewModel::voltarResumoConsultaQr,
+                                onSave = viewModel::salvarNotaConsultadaQr,
+                                saving = qrTest.salvandoNota,
+                                saved = qrTest.notaSalva,
+                                message = qrTest.mensagemSalvamento,
+                                onNewQuery = {
+                                    viewModel.limparConsultaQr()
+                                    scanner.startScan()
+                                        .addOnSuccessListener { barcode -> viewModel.consultarQrCode(barcode.rawValue) }
+                                        .addOnFailureListener { viewModel.scannerQrFalhou() }
+                                }
+                            )
                             screen == "Teste QR" -> QrTestScreen(qrTest, Modifier.weight(1f)) {
                                 scanner.startScan()
                                     .addOnSuccessListener { barcode -> viewModel.consultarQrCode(barcode.rawValue) }
@@ -121,7 +139,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun QrTestScreen(state: QrTestUiState, modifier: Modifier = Modifier, onScan: () -> Unit) {
     Column(modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Teste de consulta NFC-e", style = MaterialTheme.typography.titleLarge)
+        Text("Consultar NFC-e", style = MaterialTheme.typography.titleLarge)
         Text("Leia o QR Code impresso na NFC-e. O conteúdo e a chave não serão exibidos nem gravados em Logcat.")
         Button(onClick = onScan, enabled = !state.carregando) { Text("Escanear QR Code") }
         Text(
@@ -161,6 +179,77 @@ private fun QrTestScreen(state: QrTestUiState, modifier: Modifier = Modifier, on
     }
 }
 
+@Composable
+private fun NfceReviewScreen(
+    nota: NotaFiscal,
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
+    onSave: () -> Unit,
+    saving: Boolean,
+    saved: Boolean,
+    message: String?,
+    onNewQuery: () -> Unit
+) {
+    Column(modifier.fillMaxSize()) {
+        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                Text("Conferir NFC-e", style = MaterialTheme.typography.titleLarge)
+                Text(nota.emitente, style = MaterialTheme.typography.titleMedium)
+                Text("Emissão: ${nota.dataEmissao?.toString() ?: "não informada"}")
+                Text("Número: ${nota.numero ?: "não informado"} · Série: ${nota.serie ?: "não informada"}")
+                Text("Chave: ${nota.chave.mascararChave()}")
+                Text("Produtos extraídos: ${nota.itens.size}" + (nota.quantidadeItensInformada?.let { " · informado: $it" } ?: ""))
+                nota.totalProdutos?.let { Text("Total dos produtos: ${it.emReais()}") }
+                nota.descontos?.let { Text("Descontos: ${it.emReais()}") }
+                nota.acrescimos?.let { Text("Acréscimos, frete e despesas: ${it.emReais()}") }
+                Text("Total da nota: ${nota.total.emReais()}", style = MaterialTheme.typography.titleMedium)
+                nota.valorPago?.let { Text("Valor pago: ${it.emReais()}") }
+                nota.troco?.let { Text("Troco: ${it.emReais()}") }
+            }
+            item { Text("Produtos", style = MaterialTheme.typography.titleLarge) }
+            itemsIndexed(nota.itens) { index, item ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("${index + 1}. ${item.descricao}", style = MaterialTheme.typography.titleMedium)
+                        Text("Quantidade: ${item.quantidade.toPlainString()} ${item.unidade}")
+                        Text("Valor unitário: ${item.valorUnitario.emReais()}")
+                        Text("Valor total: ${item.valorTotal.emReais()}")
+                    }
+                }
+            }
+            item {
+                Text("Pagamentos", style = MaterialTheme.typography.titleLarge)
+                if (nota.pagamentos.isEmpty()) Text("Nenhuma forma de pagamento identificada.")
+            }
+            itemsIndexed(nota.pagamentos) { index, pagamento ->
+                Text("${index + 1}. ${pagamento.forma}: ${pagamento.valor.emReais()}")
+            }
+            item {
+                Text("Validações", style = MaterialTheme.typography.titleLarge)
+                Text(if (nota.validacao.avisos.isEmpty()) "Resultado geral: conferência sem divergências" else "Resultado geral: há campos para conferir")
+                Text("Chave: ${if (nota.validacao.chaveValida) "válida" else "inválida"}")
+                Text("Quantidade: ${nota.validacao.qtdItensConfere?.let { if (it) "confere" else "diverge" } ?: "não informada"}")
+                Text("Soma dos itens: ${nota.validacao.somaItens.emReais()} · total ajustado: ${if (nota.validacao.somaItensConfereComTotal) "confere" else "diverge"}")
+                nota.validacao.avisos.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onBack, modifier = Modifier.weight(1f)) { Text("Voltar") }
+            Button(onClick = onSave, enabled = !saving && !saved, modifier = Modifier.weight(1f)) {
+                Text(when { saved -> "Salva"; saving -> "Salvando…"; else -> "Salvar nota" })
+            }
+            Button(onClick = onNewQuery, modifier = Modifier.weight(1f)) { Text("Nova consulta") }
+        }
+        message?.let { Text(it, color = if (saved) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+    }
+}
+
+private fun BigDecimal.emReais(): String = NumberFormat.getCurrencyInstance(Locale("pt", "BR")).format(this)
+
+private fun String.emReais(): String = toBigDecimalOrNull()?.emReais() ?: this
+
+private fun String.mascararChave(): String = if (length == 44) "${"•".repeat(40)}${takeLast(4)}" else "Chave indisponível"
+
 private fun RevisaoUiState.sucesso() = salvo
 
 @Composable
@@ -173,6 +262,7 @@ private fun HomeScreen(
     modifier: Modifier = Modifier
 ) {
     var noteToDelete by remember { mutableStateOf<br.com.feira.nfce.notas.data.NotaComItens?>(null) }
+    var noteToShow by remember { mutableStateOf<br.com.feira.nfce.notas.data.NotaComItens?>(null) }
     noteToDelete?.let { note ->
         AlertDialog(
             onDismissRequest = { noteToDelete = null },
@@ -183,6 +273,11 @@ private fun HomeScreen(
             },
             dismissButton = { TextButton(onClick = { noteToDelete = null }) { Text("Cancelar") } }
         )
+    }
+    val selectedNote = noteToShow
+    if (selectedNote != null) {
+        NotaPersistidaDetails(selectedNote, onBack = { noteToShow = null }, modifier = modifier)
+        return
     }
     Column(modifier.fillMaxSize()) {
         Text("Importe um arquivo HTML ou MHTML salvo da consulta NFC-e da SEFAZ-AM. O processamento acontece no aparelho.", style = MaterialTheme.typography.bodyMedium)
@@ -199,6 +294,7 @@ private fun HomeScreen(
                         Text("CNPJ ${note.nota.cnpj} · ${note.nota.dataEmissao.orEmpty()}")
                         Text("Total R$ ${note.nota.total} · ${note.itens.size} produtos")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { noteToShow = note }) { Text("Detalhes") }
                             TextButton(onClick = { onExport(note) }) { Text("Exportar JSON") }
                             TextButton(onClick = { noteToDelete = note }) { Text("Excluir nota") }
                         }
@@ -206,6 +302,48 @@ private fun HomeScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun NotaPersistidaDetails(
+    note: br.com.feira.nfce.notas.data.NotaComItens,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier.fillMaxSize()) {
+        Text("Detalhes da NFC-e", style = MaterialTheme.typography.titleLarge)
+        Text(note.nota.emitente, style = MaterialTheme.typography.titleMedium)
+        Text("Emissão: ${note.nota.dataEmissao ?: "não informada"}")
+        Text("Número: ${note.nota.numero ?: "não informado"} · Série: ${note.nota.serie ?: "não informada"}")
+        Text("Chave: ${note.nota.chave.mascararChave()}")
+        Text("Total da nota: ${note.nota.total.emReais()}")
+        note.nota.totalProdutos?.let { Text("Total dos produtos: ${it.emReais()}") }
+        note.nota.descontos?.let { Text("Descontos: ${it.emReais()}") }
+        note.nota.acrescimos?.let { Text("Acréscimos: ${it.emReais()}") }
+        note.nota.valorPago?.let { Text("Valor pago: ${it.emReais()}") }
+        note.nota.troco?.let { Text("Troco: ${it.emReais()}") }
+        note.nota.quantidadeItensInformada?.let { Text("Quantidade de itens informada na nota: $it") }
+        Text("${note.itens.size} produtos", style = MaterialTheme.typography.titleMedium)
+        LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            itemsIndexed(note.itens, key = { _, item -> item.id }) { index, item ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("${index + 1}. ${item.descricao}", style = MaterialTheme.typography.titleMedium)
+                        Text("Quantidade: ${item.quantidade} ${item.unidade}")
+                        Text("Valor unitário: ${item.valorUnitario.emReais()}")
+                        Text("Valor total: ${item.valorTotal.emReais()}")
+                    }
+                }
+            }
+            if (note.pagamentos.isNotEmpty()) {
+                item { Text("Pagamentos", style = MaterialTheme.typography.titleLarge) }
+                itemsIndexed(note.pagamentos, key = { _, payment -> payment.id }) { index, payment ->
+                    Text("${index + 1}. ${payment.forma}: ${payment.valor.emReais()}")
+                }
+            }
+        }
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Voltar ao histórico") }
     }
 }
 

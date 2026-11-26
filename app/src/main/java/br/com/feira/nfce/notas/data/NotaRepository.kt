@@ -43,7 +43,13 @@ class NotaRepository(private val db: AppDatabase, private val categorizador: Cat
                 somaItens = nota.validacao.somaItens.toPlainString(),
                 qtdItensConfere = nota.validacao.qtdItensConfere,
                 chaveValida = nota.validacao.chaveValida,
-                importadaEm = Instant.now().toEpochMilli()
+                importadaEm = Instant.now().toEpochMilli(),
+                totalProdutos = nota.totalProdutos?.toPlainString(),
+                descontos = nota.descontos?.toPlainString(),
+                acrescimos = nota.acrescimos?.toPlainString(),
+                valorPago = nota.valorPago?.toPlainString(),
+                troco = nota.troco?.toPlainString(),
+                quantidadeItensInformada = nota.quantidadeItensInformada
             )
         )
         if (notaId <= 0) return@withTransaction false
@@ -77,6 +83,53 @@ class NotaRepository(private val db: AppDatabase, private val categorizador: Cat
                 )
             )
         }
+        true
+    }
+
+    /** Persists a QR consultation as extracted, without running categorization or learning. */
+    suspend fun salvarConsultaQr(nota: NotaFiscal): Boolean = db.withTransaction {
+        val dao = db.notaDao()
+        if (dao.porChave(nota.chave) != null) return@withTransaction false
+        val noteId = dao.inserirNota(
+            NotaFiscalEntity(
+                chave = nota.chave,
+                cnpj = nota.cnpj,
+                emitente = nota.emitente,
+                numero = nota.numero,
+                serie = nota.serie,
+                dataEmissao = nota.dataEmissao?.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
+                total = nota.total.toPlainString(),
+                somaItensConfere = nota.validacao.somaItensConfereComTotal,
+                somaItens = nota.validacao.somaItens.toPlainString(),
+                qtdItensConfere = nota.validacao.qtdItensConfere,
+                chaveValida = nota.validacao.chaveValida,
+                importadaEm = Instant.now().toEpochMilli(),
+                totalProdutos = nota.totalProdutos?.toPlainString(),
+                descontos = nota.descontos?.toPlainString(),
+                acrescimos = nota.acrescimos?.toPlainString(),
+                valorPago = nota.valorPago?.toPlainString(),
+                troco = nota.troco?.toPlainString(),
+                quantidadeItensInformada = nota.quantidadeItensInformada
+            )
+        )
+        if (noteId <= 0) return@withTransaction false
+        dao.inserirItens(nota.itens.map { item ->
+            ItemNotaEntity(
+                notaId = noteId,
+                descricao = item.descricao,
+                codigo = item.codigo,
+                quantidade = item.quantidade.toPlainString(),
+                unidade = item.unidade,
+                valorUnitario = item.valorUnitario.toPlainString(),
+                valorTotal = item.valorTotal.toPlainString(),
+                categoriaId = null,
+                categoriaOrigem = "NAO_CLASSIFICADO",
+                identificacaoAmbigua = false
+            )
+        })
+        dao.inserirPagamentos(nota.pagamentos.map {
+            PagamentoEntity(notaId = noteId, forma = it.forma, valor = it.valor.toPlainString())
+        })
         true
     }
 

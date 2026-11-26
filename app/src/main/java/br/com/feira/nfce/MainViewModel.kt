@@ -61,8 +61,14 @@ data class QrTestUiState(
     val produtosIdentificados: Int? = null,
     val produtosComCamposCompletos: Int? = null,
     val parserAceitouHtml: Boolean? = null,
+    val notaConferencia: NotaFiscal? = null,
+    val salvandoNota: Boolean = false,
+    val notaSalva: Boolean = false,
+    val mensagemSalvamento: String? = null,
     val mensagem: String? = null
-)
+) {
+    override fun toString() = "QrTestUiState(qrLido=$qrLido, nfceAmReconhecida=$nfceAmReconhecida, statusHttp=$statusHttp, produtosIdentificados=$produtosIdentificados, parserAceitouHtml=$parserAceitouHtml, hasParsedNote=${notaConferencia != null})"
+}
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val database = AppDatabase.get(application)
@@ -186,7 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     result.responseBytes == 0 -> "A resposta da SEFAZ veio vazia."
                     inspection == null || !inspection.isHtml -> "A resposta recebida não é HTML."
                     inspection.parserAccepted -> "HTML de NFC-e reconhecido; o parser AM identificou ${inspection.productCount} produto(s)."
-                    inspection.hasNfceStructure -> "A página contém estrutura de NFC-e, mas o parser AM não conseguiu interpretá-la por completo."
+                    inspection.hasNfceStructure -> inspection.parserError ?: "A página contém estrutura de NFC-e, mas o parser AM não conseguiu interpretá-la por completo."
                     else -> "O HTML recebido não corresponde à estrutura esperada de uma NFC-e do Amazonas."
                 }
                 _qrTest.value = QrTestUiState(
@@ -204,6 +210,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     produtosIdentificados = inspection?.productCount,
                     produtosComCamposCompletos = inspection?.completeProductCount,
                     parserAceitouHtml = inspection?.parserAccepted,
+                    notaConferencia = inspection?.parsedNota,
                     mensagem = message
                 )
             } catch (_: Exception) {
@@ -214,6 +221,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
+    }
+
+    fun voltarResumoConsultaQr() {
+        _qrTest.value = _qrTest.value.copy(notaConferencia = null)
+    }
+
+    fun salvarNotaConsultadaQr() {
+        val current = _qrTest.value
+        val note = current.notaConferencia ?: return
+        if (current.salvandoNota || current.notaSalva) return
+        _qrTest.value = current.copy(salvandoNota = true, mensagemSalvamento = null)
+        viewModelScope.launch {
+            try {
+                val inserted = withContext(Dispatchers.IO) { repository.salvarConsultaQr(note) }
+                _qrTest.value = _qrTest.value.copy(
+                    salvandoNota = false,
+                    notaSalva = inserted,
+                    mensagemSalvamento = if (inserted) "NFC-e salva no aparelho para consulta offline." else "Esta NFC-e já está cadastrada."
+                )
+            } catch (_: Exception) {
+                _qrTest.value = _qrTest.value.copy(
+                    salvandoNota = false,
+                    mensagemSalvamento = "Não foi possível salvar a NFC-e. Nenhum dado foi descartado da consulta."
+                )
+            }
+        }
+    }
+
+    fun limparConsultaQr() {
+        _qrTest.value = QrTestUiState()
     }
 
     fun excluirNota(notaId: Long) = viewModelScope.launch(Dispatchers.IO) {
